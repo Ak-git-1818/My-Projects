@@ -1,0 +1,546 @@
+
+---
+title: "21970107_BUS5001_Assignment2_Q2"
+output:
+  html_document:
+    toc: true
+---
+
+
+```{r}
+%md
+
+## Overview
+
+This notebook will show you how to create and query a table or DataFrame that you uploaded to DBFS. [DBFS](https://docs.databricks.com/user-guide/dbfs-databricks-file-system.html) is a Databricks File System that allows you to store data for querying inside of Databricks. This notebook assumes that you have a file already inside of DBFS that you would like to read from.
+
+This notebook is written in **Python** so the default cell type is Python. However, you can use different languages by using the `%LANGUAGE` syntax. Python, Scala, SQL, and R are all supported.
+```
+
+
+```{r}
+library(SparkR)
+
+# Corrected vector of all file paths
+file_paths <- c(
+  "/FileStore/tables/yellow_tripdata_2017_01.parquet",
+  "/FileStore/tables/yellow_tripdata_2017_02.parquet",
+  "/FileStore/tables/yellow_tripdata_2017_03.parquet",
+  "/FileStore/tables/yellow_tripdata_2017_04.parquet",
+  "/FileStore/tables/yellow_tripdata_2017_05.parquet",
+  "/FileStore/tables/yellow_tripdata_2017_06.parquet",
+  "/FileStore/tables/yellow_tripdata_2017_07.parquet",
+  "/FileStore/tables/yellow_tripdata_2017_08.parquet",
+  "/FileStore/tables/yellow_tripdata_2017_09.parquet",
+  "/FileStore/tables/yellow_tripdata_2017_10.parquet",
+  "/FileStore/tables/yellow_tripdata_2017_11.parquet",
+  "/FileStore/tables/yellow_tripdata_2017_12.parquet"
+)
+
+# Load them all
+df <- read.parquet(file_paths)
+
+# Show result
+display(df)
+
+```
+
+
+```{r}
+# Force SparkR namespace
+SparkR::count(df)
+
+```
+
+
+```{r}
+library(SparkR)
+
+# Get column names
+columns <- colnames(df)
+
+# Get total number of rows
+total_rows <- SparkR::count(df)
+
+# Initialize result holders
+col_names <- c()
+missing_counts <- c()
+
+# Loop through columns
+for (col in columns) {
+  null_df <- where(df, isNull(df[[col]]))
+  null_count <- SparkR::count(null_df)  # Use SparkR::count explicitly
+  col_names <- c(col_names, col)
+  missing_counts <- c(missing_counts, null_count)
+}
+
+# Combine results into data frame
+missing_summary <- data.frame(
+  Column = col_names,
+  Missing_Count = missing_counts,
+  Missing_Percent = round((missing_counts / total_rows) * 100, 2)
+)
+
+print(missing_summary)
+
+```
+
+
+```{r}
+library(SparkR)
+
+# Step 1: Get numeric columns
+all_numeric <- colnames(df)[sapply(SparkR::dtypes(df), function(x) x %in% c("integer", "double"))]
+
+# Step 2: Exclude specific columns with many nulls
+excluded_cols <- c("congestion_surcharge", "airport_fee")
+numeric_cols <- setdiff(all_numeric, excluded_cols)
+
+# Step 3: Initialize output
+outlier_summary <- data.frame(
+  Column = character(),
+  Q1 = numeric(),
+  Q3 = numeric(),
+  IQR = numeric(),
+  Lower_Bound = numeric(),
+  Upper_Bound = numeric(),
+  Outlier_Count = integer(),
+  stringsAsFactors = FALSE
+)
+
+# Step 4: Loop with outlier logic
+for (col in numeric_cols) {
+  tryCatch({
+    # Compute Q1 and Q3
+    q_list <- approxQuantile(df, col, c(0.25, 0.75), relativeError = 0.01)
+    Q1 <- as.numeric(q_list[1])
+    Q3 <- as.numeric(q_list[2])
+    
+    # Skip constant columns
+    if (Q1 == Q3) next
+
+    IQR <- Q3 - Q1
+    lower_bound <- Q1 - 1.5 * IQR
+    upper_bound <- Q3 + 1.5 * IQR
+
+    # Count outliers
+    outlier_rows <- where(df, df[[col]] < lower_bound | df[[col]] > upper_bound)
+    outlier_count <- SparkR::count(outlier_rows)
+
+    # Add to result
+    outlier_summary <- rbind(outlier_summary, data.frame(
+      Column = col,
+      Q1 = Q1,
+      Q3 = Q3,
+      IQR = IQR,
+      Lower_Bound = lower_bound,
+      Upper_Bound = upper_bound,
+      Outlier_Count = outlier_count,
+      stringsAsFactors = FALSE
+    ))
+  }, error = function(e) {
+    message(paste("Skipped column:", col, "->", e$message))
+  })
+}
+
+# Step 5: View final result
+print(outlier_summary)
+
+```
+
+
+```{r}
+library(SparkR)
+
+# Step 1: Get numeric columns and exclude specific ones
+all_numeric <- colnames(df)[sapply(SparkR::dtypes(df), function(x) x %in% c("integer", "double"))]
+excluded_cols <- c("congestion_surcharge", "airport_fee")
+numeric_cols <- setdiff(all_numeric, excluded_cols)
+
+# Step 2: Loop and filter out outliers column by column
+for (col in numeric_cols) {
+  tryCatch({
+    # Compute Q1 and Q3
+    q_list <- approxQuantile(df, col, c(0.25, 0.75), relativeError = 0.01)
+    Q1 <- as.numeric(q_list[1])
+    Q3 <- as.numeric(q_list[2])
+
+    # Skip if no variability or nulls
+    if (Q1 == Q3 || is.na(Q1) || is.na(Q3)) next
+
+    IQR <- Q3 - Q1
+    lower <- Q1 - 1.5 * IQR
+    upper <- Q3 + 1.5 * IQR
+
+    # Filter out outliers in current column and update df
+    df <- where(df, df[[col]] >= lower & df[[col]] <= upper)
+
+  }, error = function(e) {
+    message(paste("Skipping column:", col, "->", e$message))
+  })
+}
+
+
+showDF(df, numRows = 10)
+
+```
+
+
+```{r}
+library(SparkR)
+
+# Step 1: Get numeric columns
+all_numeric <- colnames(df)[sapply(SparkR::dtypes(df), function(x) x %in% c("integer", "double"))]
+
+# Step 2: Exclude specific columns with many nulls
+excluded_cols <- c("congestion_surcharge", "airport_fee")
+numeric_cols <- setdiff(all_numeric, excluded_cols)
+
+# Step 3: Initialize output
+outlier_summary <- data.frame(
+  Column = character(),
+  Q1 = numeric(),
+  Q3 = numeric(),
+  IQR = numeric(),
+  Lower_Bound = numeric(),
+  Upper_Bound = numeric(),
+  Outlier_Count = integer(),
+  stringsAsFactors = FALSE
+)
+
+# Step 4: Loop with outlier logic
+for (col in numeric_cols) {
+  tryCatch({
+    # Compute Q1 and Q3
+    q_list <- approxQuantile(df, col, c(0.25, 0.75), relativeError = 0.01)
+    Q1 <- as.numeric(q_list[1])
+    Q3 <- as.numeric(q_list[2])
+    
+    # Skip constant columns
+    if (Q1 == Q3) next
+
+    IQR <- Q3 - Q1
+    lower_bound <- Q1 - 1.5 * IQR
+    upper_bound <- Q3 + 1.5 * IQR
+
+    # Count outliers
+    outlier_rows <- where(df, df[[col]] < lower_bound | df[[col]] > upper_bound)
+    outlier_count <- SparkR::count(outlier_rows)
+
+    # Add to result
+    outlier_summary <- rbind(outlier_summary, data.frame(
+      Column = col,
+      Q1 = Q1,
+      Q3 = Q3,
+      IQR = IQR,
+      Lower_Bound = lower_bound,
+      Upper_Bound = upper_bound,
+      Outlier_Count = outlier_count,
+      stringsAsFactors = FALSE
+    ))
+  }, error = function(e) {
+    message(paste("Skipped column:", col, "->", e$message))
+  })
+}
+
+# Step 5: View final result
+print(outlier_summary)
+```
+
+
+```{r}
+# Create a new column for the ratio (corrected typo)
+df_ratio <- withColumn(df, "fare_per_distance", df$fare_amount / df$trip_distance)
+
+# Group by PULocationID and calculate the average fare_per_distance
+avg_fare_per_mile <- summarize(
+  groupBy(df_ratio, df_ratio$PULocationID),
+  avg_fare_per_mile = mean(df_ratio$fare_per_distance)
+)
+
+# Show the result
+display(avg_fare_per_mile)
+
+```
+
+
+```{r}
+# Collect SparkDataFrame to local R dataframe
+df_local <- SparkR::collect(avg_fare_per_mile)
+
+# Now use dplyr to manipulate locally
+library(dplyr)
+
+top_10_high <- df_local %>%
+  arrange(desc(avg_fare_per_mile)) %>%
+  slice(1:10)
+
+top_10_low <- df_local %>%
+  arrange(avg_fare_per_mile) %>%
+  slice(1:10)
+
+# Create comparison table
+comparison_result <- data.frame(
+  Rank = 1:10,
+  High_PULocationID = top_10_high$PULocationID,
+  High_avg_fare_per_mile = top_10_high$avg_fare_per_mile,
+  Low_PULocationID = top_10_low$PULocationID,
+  Low_avg_fare_per_mile = top_10_low$avg_fare_per_mile
+)
+
+# View the result
+print(comparison_result)
+
+```
+
+
+```{r}
+display(comparison_result)
+```
+
+
+```{r}
+# Add hour and weekday to df_ratio
+df_ratio <- withColumn(df_ratio, "pickup_hour", hour(df_ratio$tpep_pickup_datetime))
+df_ratio <- withColumn(df_ratio, "pickup_day", dayofweek(df_ratio$tpep_pickup_datetime))  # 1 = Sun, ..., 7 = Sat
+
+# Add period column: peak vs off_peak
+df_ratio <- withColumn(
+  df_ratio,
+  "period",
+  when(
+    (df_ratio$pickup_day >= 2 & df_ratio$pickup_day <= 6) &
+    ((df_ratio$pickup_hour >= 7 & df_ratio$pickup_hour <= 10) |
+     (df_ratio$pickup_hour >= 16 & df_ratio$pickup_hour <= 19)),
+    "peak"
+  ) %>% otherwise("off_peak")
+)
+
+# Group by PULocationID and period using SparkR explicitly
+fare_by_period <- SparkR::summarize(
+  SparkR::groupBy(df_ratio, df_ratio$PULocationID, df_ratio$period),
+  avg_fare_per_distance = mean(df_ratio$fare_per_distance)
+)
+
+# Collect to R dataframe
+fare_by_period_r <- SparkR::collect(fare_by_period)
+
+```
+
+
+```{r}
+library(dplyr)
+
+# Split data
+peak_df <- fare_by_period_r %>% filter(period == "peak")
+offpeak_df <- fare_by_period_r %>% filter(period == "off_peak")
+
+# Top and bottom 10 zones for each period
+top10_peak <- peak_df %>% arrange(desc(avg_fare_per_distance)) %>% slice(1:10)
+low10_peak <- peak_df %>% arrange(avg_fare_per_distance) %>% slice(1:10)
+
+top10_offpeak <- offpeak_df %>% arrange(desc(avg_fare_per_distance)) %>% slice(1:10)
+low10_offpeak <- offpeak_df %>% arrange(avg_fare_per_distance) %>% slice(1:10)
+
+# Print comparisons
+print(top10_peak)
+print(low10_peak)
+print(top10_offpeak)
+print(low10_offpeak)
+
+```
+
+
+```{r}
+display(top10_peak)
+```
+
+
+```{r}
+display(low10_peak)
+```
+
+
+```{r}
+display(top10_offpeak)
+```
+
+
+```{r}
+display(low10_offpeak)
+```
+
+
+```{r}
+library(dplyr)
+library(ggplot2)
+
+# Split data into peak and off-peak
+peak_df <- fare_by_period_r %>% filter(period == "peak")
+offpeak_df <- fare_by_period_r %>% filter(period == "off_peak")
+
+# Get top 10 for each period
+top10_peak <- peak_df %>% arrange(desc(avg_fare_per_distance)) %>% slice(1:10)
+top10_offpeak <- offpeak_df %>% arrange(desc(avg_fare_per_distance)) %>% slice(1:10)
+
+# Add a column to label the period
+top10_peak$TimePeriod <- "Peak"
+top10_offpeak$TimePeriod <- "Off-Peak"
+
+# Combine both into one dataframe
+combined_top10 <- rbind(top10_peak, top10_offpeak)
+
+# Convert PULocationID to factor so they display in order
+combined_top10$PULocationID <- as.factor(combined_top10$PULocationID)
+
+# Plot
+ggplot(combined_top10, aes(x = reorder(PULocationID, -avg_fare_per_distance), 
+y = avg_fare_per_distance, 
+fill = TimePeriod)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  labs(title = "Top 10 Zones by Average Fare per Distance",
+ x = "Pickup Location ID (PULocationID)",
+y = "Average Fare per Distance (Fare / Mile)",
+fill = "Time Period") +
+  theme_minimal()
+
+```
+
+
+```{r}
+df <- withColumn(df, "pickup_hour", hour(df$tpep_pickup_datetime))
+
+```
+
+
+```{r}
+morning_df <- SparkR::filter(df, df$pickup_hour >= 7 & df$pickup_hour <= 10)
+
+# STEP 3: Group and count pickups by PULocationID
+morning_pu <- SparkR::count(
+  SparkR::groupBy(morning_df, morning_df$PULocationID)
+)
+
+# Group and count drop-offs by DOLocationID
+morning_do <- SparkR::count(
+  SparkR::groupBy(morning_df, morning_df$DOLocationID)
+)
+
+# STEP 4: Collect results to local R
+morning_pu_r <- SparkR::collect(morning_pu)
+colnames(morning_pu_r) <- c("LocationID", "trip_count")
+
+morning_do_r <- SparkR::collect(morning_do)
+colnames(morning_do_r) <- c("LocationID", "trip_count")
+```
+
+
+```{r}
+library(dplyr)
+
+top10_morning_pu <- morning_pu_r %>%
+  arrange(desc(trip_count)) %>%
+  slice(1:10)
+
+top10_morning_do <- morning_do_r %>%
+  arrange(desc(trip_count)) %>%
+  slice(1:10)
+```
+
+
+```{r}
+display(top10_morning_pu)
+```
+
+
+```{r}
+display(top10_morning_do)
+```
+
+
+```{r}
+library(ggplot2)
+
+# Pickup zones
+ggplot(top10_morning_pu, aes(x = factor(LocationID), y = trip_count)) +
+  geom_bar(stat = "identity", fill = "steelblue") +
+  labs(title = "Top 10 Pickup Zones – Morning Rush (7–10 AM)",
+       x = "Pickup Location ID", y = "Trip Count") +
+  theme_minimal()
+```
+
+
+```{r}
+# STEP 6: Visualize Top 10 as Bar Charts
+library(ggplot2)
+
+# Drop-off zones
+ggplot(top10_morning_do, aes(x = factor(LocationID), y = trip_count)) +
+  geom_bar(stat = "identity", fill = "tomato") +
+  labs(title = "Top 10 Drop-off Zones – Morning Rush (7–10 AM)",
+       x = "Drop-off Location ID", y = "Trip Count") +
+  theme_minimal()
+```
+
+
+```{r}
+# STEP 2: Filter for evening peak (4PM–7PM)
+evening_df <- SparkR::filter(df, df$pickup_hour >= 16 & df$pickup_hour <= 19)
+
+# STEP 3: Group and count pickups by PULocationID
+evening_pu <- SparkR::count(
+  SparkR::groupBy(evening_df, evening_df$PULocationID)
+)
+
+# Group and count drop-offs by DOLocationID
+evening_do <- SparkR::count(
+  SparkR::groupBy(evening_df, evening_df$DOLocationID)
+)
+
+# STEP 4: Collect results to local R
+evening_pu_r <- SparkR::collect(evening_pu)
+colnames(evening_pu_r) <- c("LocationID", "trip_count")
+
+evening_do_r <- SparkR::collect(evening_do)
+colnames(evening_do_r) <- c("LocationID", "trip_count")
+
+```
+
+
+```{r}
+# STEP 5: Get Top 10 Pickup and Drop-Off Zones
+library(dplyr)
+
+top10_evening_pu <- evening_pu_r %>%
+  arrange(desc(trip_count)) %>%
+  slice(1:10)
+
+top10_evening_do <- evening_do_r %>%
+  arrange(desc(trip_count)) %>%
+  slice(1:10)
+```
+
+
+```{r}
+library(ggplot2)
+
+# Pickup zones
+ggplot(top10_evening_pu, aes(x = factor(LocationID), y = trip_count)) +
+  geom_bar(stat = "identity", fill = "darkgreen") +
+  labs(title = "Top 10 Pickup Zones – Evening Peak (4–7 PM)",
+       x = "Pickup Location ID", y = "Trip Count") +
+  theme_minimal()
+```
+
+
+```{r}
+# STEP 6: Visualize Top 10 as Bar Charts
+library(ggplot2)
+
+# Drop-off zones
+ggplot(top10_evening_do, aes(x = factor(LocationID), y = trip_count)) +
+  geom_bar(stat = "identity", fill = "darkorange") +
+  labs(title = "Top 10 Drop-off Zones – Evening Peak (4–7 PM)",
+       x = "Drop-off Location ID", y = "Trip Count") +
+  theme_minimal()
+```
